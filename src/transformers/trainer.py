@@ -1638,6 +1638,9 @@ class Trainer:
         if args.eval_on_start:
             self._evaluate(trial, ignore_keys_for_eval, skip_scheduler=True)
 
+        if self.control.should_training_stop:
+            return self._finalize_training(trial, num_train_samples, start_time)
+
         for epoch in range(epochs_trained, num_train_epochs):
             self.control = self.callback_handler.on_epoch_begin(self.args, self.state, self.control)
             self._run_epoch(

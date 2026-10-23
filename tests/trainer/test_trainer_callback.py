@@ -48,6 +48,8 @@ from transformers.trainer_callback import CallbackHandler, ExportableState, Trai
 
 
 if is_torch_available():
+    import torch
+
     from transformers.trainer import DEFAULT_CALLBACKS, TRAINER_STATE_NAME
 
     from .trainer_test_utils import RegressionDataset, RegressionModelConfig, RegressionPreTrainedModel
@@ -144,6 +146,14 @@ class StopTrainingCallback(TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):
         if state.global_step >= self.stop_after_steps:
             control.should_training_stop = True
+        return control
+
+
+class StopOnTrainBeginCallback(TrainerCallback):
+    """A callback that stops training before the first step."""
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        control.should_training_stop = True
         return control
 
 
@@ -459,6 +469,48 @@ class TrainerCallbackTest(unittest.TestCase):
 
         # Training should have stopped after 1 step, not 10
         self.assertEqual(trainer.state.global_step, 1)
+
+    def test_callback_can_stop_training_on_train_begin(self):
+        """A stop requested in `on_train_begin` should skip every step but still end training normally."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter(action="ignore", category=UserWarning)
+
+            trainer = self._create_trainer(
+                callbacks=[StopOnTrainBeginCallback, EventRecorderCallback],
+                max_steps=10,
+                save_strategy="no",
+            )
+            params_before = {k: v.cpu().clone() for k, v in trainer.model.state_dict().items()}
+            output = trainer.train()
+
+        self.assertEqual(output.global_step, 0)
+        self.assertEqual(trainer.state.global_step, 0)
+        for k, v in trainer.model.state_dict().items():
+            torch.testing.assert_close(v.cpu(), params_before[k], rtol=0, atol=0)
+        events = self._get_callback(trainer, EventRecorderCallback).events
+        self.assertEqual(events, ["on_init_end", "on_train_begin", "on_log", "on_train_end"])
+
+    def test_callback_can_stop_training_on_train_begin_when_resuming(self):
+        """A stop requested in `on_train_begin` should keep the checkpoint's step and weights when resuming."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter(action="ignore", category=UserWarning)
+
+            trainer = self._create_trainer(max_steps=10, save_steps=5)
+            trainer.train()
+            checkpoint = os.path.join(self.output_dir, "checkpoint-5")
+
+            trainer = self._create_trainer(callbacks=[StopOnTrainBeginCallback], max_steps=10, save_steps=5)
+            output = trainer.train(resume_from_checkpoint=checkpoint)
+
+        self.assertEqual(output.global_step, 5)
+        self.assertEqual(trainer.state.global_step, 5)
+        checkpoint_model = RegressionPreTrainedModel.from_pretrained(checkpoint)
+        torch.testing.assert_close(trainer.model.a.cpu(), checkpoint_model.a, rtol=0, atol=0)
+        torch.testing.assert_close(trainer.model.b.cpu(), checkpoint_model.b, rtol=0, atol=0)
 
     def test_callback_receives_control_flags(self):
         """Callbacks should receive current control flags."""
